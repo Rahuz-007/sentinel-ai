@@ -40,10 +40,10 @@ alert_system = AlertSystem()
 @app.route('/health', methods=['GET'])
 @app.route('/test', methods=['GET'])
 def test_connection():
-    return jsonify({"status": "ok", "service": "Sentinel AI ML Service", "version": "3.0.0",
-                    "engine": "PyTorch MobileNetV2",
+    return jsonify({"status": "ok", "service": "Sentinel AI ML Service", "version": "4.0.0",
+                    "engine": "PyTorch + YOLOv8-Pose (Multi-Evidence Fusion)",
                     "model_loaded": predictor.classifier is not None,
-                    "yolo_loaded":  predictor.person_model is not None})
+                    "yolo_loaded":  predictor.pose_model is not None})
 
 @app.route('/test-alert', methods=['GET'])
 def test_alert():

@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Sentinel AI leverages state-of-the-art machine learning algorithms to analyze human behavior in real-time, instantly identifying and alerting on potential security risks.">
+    <meta name="keywords" content="AI Security, Behavior Analysis, Threat Detection, Sentinel AI, Visual Intelligence">
+    <title>Sentinel AI | Predictive Threat Detection Sandbox</title>
+    
+    <!-- Modern Typography -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Rajdhani:wght@500;600;700&display=swap" rel="stylesheet">
+    
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    
+    <!-- Ambient Background Effects -->
+    <div class="ambient-background">
+        <div class="glow-orb orb-1"></div>
+        <div class="glow-orb orb-2"></div>
+        <div class="glow-orb orb-3"></div>
+        <div class="grid-overlay"></div>
+    </div>
+
+    <!-- Navigation -->
+    <nav class="navbar">
+        <div class="nav-container">
+            <div class="brand">
+                <div class="brand-logo">🛡️</div>
+                <div class="brand-text">
+                    <span class="brand-name">Sentinel</span>
+                    <span class="brand-version">v3.2 ENGINE</span>
+                </div>
+            </div>
+            <div class="nav-links">
+                <a href="#features">Capabilities</a>
+                <a href="#architecture">Architecture</a>
+                <button class="btn btn-outline" id="navLoginBtn">System Login</button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <header class="hero">
+        <div class="hero-content">
+            <div class="badge-pill">
+                <span class="pulse-dot"></span> LIVE NEURAL ENGINE ACTIVE
+            </div>
+            <h1 class="hero-title">Predictive threat detection <br>powered by <span class="text-gradient">Visual AI</span></h1>
+            <p class="hero-subtitle">
+                Sentinel AI processes multi-camera feeds in real-time. By utilizing YOLOv8-Pose and specialized recurrent neural networks, we identify hostile behavior faster than human operators.
+            </p>
+            <div class="hero-cta">
+                <button class="btn btn-primary" id="heroLoginBtn">
+                    Access Dashboard
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"></line><polyline points="12 5 19 12 12 19"></polyline></svg>
+                </button>
+                <a href="#features" class="btn btn-ghost">View Specifications</a>
+            </div>
+        </div>
+        
+        <div class="hero-visual">
+            <div class="mockup-frame">
+                <div class="mockup-header">
+                    <div class="dots"><span></span><span></span><span></span></div>
+                    <div class="mockup-title">sentinel_stream_01.mp4</div>
+                </div>
+                <!-- Mockup Video / Image Area -->
+                <div class="mockup-body">
+                    <div class="scanline"></div>
+                    <div class="bounding-box b1">
+                        <span class="box-label">SUBJECT_01 | 94%</span>
+                    </div>
+                    <div class="bounding-box b2 alert-box">
+                        <span class="box-label alert-text">HOSTILE | 88%</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Features Section -->
+    <section id="features" class="features">
+        <div class="section-header">
+            <h2>Core Protocol <span class="text-gradient">Capabilities</span></h2>
+            <p>Built for high-stakes environments where every millisecond matters.</p>
+        </div>
+        
+        <div class="feature-grid">
+            <div class="feature-card glass">
+                <div class="feature-icon">👁️</div>
+                <h3>Skeletal Tracking</h3>
+                <p>Maps 17 distinct human keypoints per subject at 60 FPS, maintaining lock across complex crowd occlusions.</p>
+            </div>
+            <div class="feature-card glass">
+                <div class="feature-icon">🧠</div>
+                <h3>Contextual Fusion</h3>
+                <p>Fuses positional data with object interaction vectors (e.g. concealed items) to calculate absolute hostility probability.</p>
+            </div>
+            <div class="feature-card glass">
+                <div class="feature-icon">⚡</div>
+                <h3>Millisecond Alerting</h3>
+                <p>When the risk threshold is broken, Twilio SMS and SMTP alerts are autonomously sent to response teams within 200ms.</p>
+            </div>
+        </div>
+    </section>
+
+    <!-- Login Modal Overlay -->
+    <div class="modal-overlay" id="loginModal">
+        <div class="modal-backdrop" id="modalBackdrop"></div>
+        <div class="modal-card glass-heavy">
+            <button class="close-btn" id="closeModalBtn">×</button>
+            
+            <div class="login-header">
+                <div class="brand-logo large">🛡️</div>
+                <h2>Secure Login</h2>
+                <p>Command Center Authentication</p>
+            </div>
+            
+            <form id="loginForm" class="login-form">
+                <div class="form-group">
+                    <label for="username">Operator Clearance ID</label>
+                    <input type="text" id="username" placeholder="Enter Operator ID..." autocomplete="off">
+                </div>
+                <div class="form-group">
+                    <label for="password">Biometric / Passphrase</label>
+                    <input type="password" id="password" placeholder="••••••••••••">
+                </div>
+                
+                <div class="error-toast" id="loginError">
+                    <span>⚠️</span> <span id="errorText">Invalid operator credentials.</span>
+                </div>
+                
+                <button type="submit" class="btn btn-primary full-width" id="submitLoginBtn">
+                    <span class="btn-text">Authenticate Session</span>
+                    <span class="loader" style="display: none;"></span>
+                </button>
+            </form>
+            
+            <div class="login-footer">
+                <p>Restricted System. Unauthorized access is strictly logged and prosecuted under Federal Code Title 18, Section 1030.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="script.js"></script>
+</body>
+</html>

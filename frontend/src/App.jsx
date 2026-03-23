@@ -3,7 +3,6 @@ import Navbar      from './components/Navbar';
 import Dashboard   from './components/Dashboard';
 import VideoUpload from './components/VideoUpload';
 import WebcamStream from './components/WebcamStream';
-import MultiCamera from './components/MultiCamera';
 import Analytics   from './components/Analytics';
 import Login       from './components/Login';
 import './index.css';
@@ -91,7 +90,6 @@ function App() {
                     {activeTab === 'dashboard'    && <Dashboard    user={user} token={token} />}
                     {activeTab === 'analytics'    && <Analytics    token={token} />}
                     {activeTab === 'webcam'       && (isAdmin||isCCTV) && <WebcamStream token={token} />}
-                    {activeTab === 'multicam'     && (isAdmin||isCCTV) && <MultiCamera  token={token} />}
                     {activeTab === 'upload'       && <VideoUpload  token={token} />}
                 </main>
             </div>

@@ -4,7 +4,6 @@ const TABS = [
     { id: 'dashboard', label: 'Dashboard',    icon: '⚡', roles: ['admin','police','cctv_user'] },
     { id: 'analytics', label: 'Analytics',    icon: '📊', roles: ['admin','police','cctv_user'] },
     { id: 'webcam',    label: 'Live Camera',  icon: '📷', roles: ['admin','cctv_user'] },
-    { id: 'multicam',  label: 'Multi-Cam',    icon: '▩',  roles: ['admin','cctv_user'] },
     { id: 'upload',    label: 'Video Intel',  icon: '🎬', roles: ['admin','police','cctv_user'] },
 ];
 
@@ -16,41 +15,46 @@ export default function Navbar({ activeTab, setActiveTab, user, onLogout }) {
     const visibleTabs = TABS.filter(t => t.roles.includes(user?.role));
 
     return (
-        <nav className="navbar">
-            {/* Brand */}
-            <div className="navbar-brand">
-                <div className="brand-icon">🛡️</div>
-                <span className="brand-name">Sentinel</span>
-                <span className="brand-ver">v3.2</span>
+        <aside className="sidebar">
+            <div className="sidebar-header">
+                <div className="sidebar-brand">
+                    <div className="brand-icon">🛡️</div>
+                    <div className="brand-text">
+                        <span className="brand-name">Sentinel</span>
+                        <span className="brand-ver">v3.2</span>
+                    </div>
+                </div>
             </div>
 
-            <div className="navbar-divider" />
+            <div className="sidebar-divider" />
 
             {/* Navigation */}
-            <div className="navbar-nav">
+            <nav className="sidebar-nav">
+                <div className="nav-label">COMMAND MODULES</div>
                 {visibleTabs.map(tab => (
                     <button
                         key={tab.id}
                         className={`nav-btn ${activeTab === tab.id ? 'active' : ''}`}
                         onClick={() => setActiveTab(tab.id)}
                     >
-                        {tab.icon} {tab.label}
+                        <span className="nav-icon">{tab.icon}</span> 
+                        {tab.label}
                     </button>
                 ))}
-            </div>
+            </nav>
 
-            <div className="navbar-spacer" />
+            <div className="sidebar-spacer" />
 
             {/* Live indicator */}
-            <div className="navbar-status">
+            <div className="sidebar-status">
                 <div className="status-dot" />
                 SYSTEM ARMED
             </div>
 
-            <div className="navbar-divider" />
+            <div className="sidebar-divider" />
 
-            {/* User */}
-            <div className="navbar-user">
+            {/* User Profile */}
+            <div className="sidebar-user">
                 <div className="user-avatar">{initials}</div>
                 <div className="user-info">
                     <span className="user-name">{user?.username}</span>
@@ -58,9 +62,14 @@ export default function Navbar({ activeTab, setActiveTab, user, onLogout }) {
                         {ROLE_LABEL[user?.role]||user?.role}
                     </span>
                 </div>
+                <button className="logout-btn" onClick={onLogout} title="Logout">
+                    <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none">
+                        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                        <polyline points="16 17 21 12 16 7"></polyline>
+                        <line x1="21" y1="12" x2="9" y2="12"></line>
+                    </svg>
+                </button>
             </div>
-
-            <button className="logout-btn" onClick={onLogout}>LOGOUT</button>
-        </nav>
+        </aside>
     );
 }
