@@ -1,16 +1,18 @@
 import React from 'react';
 
 const TABS = [
-    { id: 'dashboard', label: 'Dashboard',  icon: '⚡', roles: ['admin', 'police', 'cctv_user'] },
-    { id: 'webcam',    label: 'Live Camera', icon: '📷', roles: ['admin', 'cctv_user'] },
-    { id: 'upload',    label: 'Video Intel', icon: '🎬', roles: ['admin', 'police', 'cctv_user'] },
+    { id: 'dashboard', label: 'Dashboard',    icon: '⚡', roles: ['admin','police','cctv_user'] },
+    { id: 'analytics', label: 'Analytics',    icon: '📊', roles: ['admin','police','cctv_user'] },
+    { id: 'webcam',    label: 'Live Camera',  icon: '📷', roles: ['admin','cctv_user'] },
+    { id: 'multicam',  label: 'Multi-Cam',    icon: '▩',  roles: ['admin','cctv_user'] },
+    { id: 'upload',    label: 'Video Intel',  icon: '🎬', roles: ['admin','police','cctv_user'] },
 ];
 
-const ROLE_COLOR = { admin: 'role-admin', police: 'role-police', cctv_user: 'role-cctv' };
-const ROLE_LABEL = { admin: 'Admin', police: 'Police', cctv_user: 'CCTV Ops' };
+const ROLE_COLOR = { admin:'role-admin', police:'role-police', cctv_user:'role-cctv' };
+const ROLE_LABEL = { admin:'👑 Admin', police:'🚔 Police', cctv_user:'📷 CCTV Ops' };
 
 export default function Navbar({ activeTab, setActiveTab, user, onLogout }) {
-    const initials = user?.username?.slice(0, 2).toUpperCase() || '??';
+    const initials    = user?.username?.slice(0,2).toUpperCase() || '??';
     const visibleTabs = TABS.filter(t => t.roles.includes(user?.role));
 
     return (
@@ -19,7 +21,7 @@ export default function Navbar({ activeTab, setActiveTab, user, onLogout }) {
             <div className="navbar-brand">
                 <div className="brand-icon">🛡️</div>
                 <span className="brand-name">Sentinel</span>
-                <span className="brand-ver">v2.1</span>
+                <span className="brand-ver">v3.2</span>
             </div>
 
             <div className="navbar-divider" />
@@ -52,8 +54,8 @@ export default function Navbar({ activeTab, setActiveTab, user, onLogout }) {
                 <div className="user-avatar">{initials}</div>
                 <div className="user-info">
                     <span className="user-name">{user?.username}</span>
-                    <span className={`user-role ${ROLE_COLOR[user?.role] || ''}`}>
-                        {ROLE_LABEL[user?.role] || user?.role}
+                    <span className={`user-role ${ROLE_COLOR[user?.role]||''}`}>
+                        {ROLE_LABEL[user?.role]||user?.role}
                     </span>
                 </div>
             </div>

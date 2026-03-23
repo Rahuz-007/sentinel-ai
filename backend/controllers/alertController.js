@@ -477,3 +477,45 @@ async function saveAlert(alertData) {
         }
     }
 }
+
+// ─── Feedback Loop (saves frame for future retraining) ───────────────────
+exports.submitFeedback = async (req, res) => {
+    try {
+        const { frame, label, alertId } = req.body;
+        // label: 'fight' | 'normal'
+        if (!frame || !label) {
+            return res.status(400).json({ error: 'frame and label required' });
+        }
+
+        // Map label to dataset folder
+        const folderMap = { fight: 'Fight', fighting: 'Fight', normal: 'Normal', false_alarm: 'Normal' };
+        const folder = folderMap[label?.toLowerCase()];
+        if (!folder) return res.status(400).json({ error: 'Invalid label' });
+
+        // Save frame to ml_service/dataset/<folder>/
+        const datasetBase = path.join(__dirname, '../../ml_service/dataset', folder);
+        if (!fs.existsSync(datasetBase)) fs.mkdirSync(datasetBase, { recursive: true });
+
+        const imgData = frame.includes(',') ? frame.split(',')[1] : frame;
+        const filename = `feedback_${Date.now()}.jpg`;
+        fs.writeFileSync(path.join(datasetBase, filename), Buffer.from(imgData, 'base64'));
+
+        // Update alert status if id provided
+        if (alertId) {
+            const newStatus = folder === 'Normal' ? 'False Alarm' : 'Verified';
+            const found = inMemoryAlerts.find(a => a._id === alertId);
+            if (found) found.status = newStatus;
+            if (isMongoConnected()) {
+                try { await Alert.findByIdAndUpdate(alertId, { status: newStatus }); } catch {}
+            }
+        }
+
+        logging.info(`✅ Feedback saved: ${filename} → dataset/${folder}/`);
+        res.json({ success: true, saved: `dataset/${folder}/${filename}` });
+    } catch (error) {
+        console.error('Feedback error:', error);
+        res.status(500).json({ error: 'Failed to save feedback' });
+    }
+};
+
+const logging = { info: (m) => console.log(m) };

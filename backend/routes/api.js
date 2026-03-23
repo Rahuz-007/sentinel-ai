@@ -46,4 +46,7 @@ router.post('/webcam-proxy',       authController.verifyToken, alertController.p
 // Stats endpoint
 router.get('/stats',               authController.verifyToken, alertController.getStats);
 
+// Feedback loop — saves frames to dataset for retraining
+router.post('/feedback',           authController.verifyToken, alertController.submitFeedback);
+
 module.exports = router;

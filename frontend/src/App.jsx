@@ -1,9 +1,11 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import Navbar   from './components/Navbar';
-import Dashboard from './components/Dashboard';
+import Navbar      from './components/Navbar';
+import Dashboard   from './components/Dashboard';
 import VideoUpload from './components/VideoUpload';
 import WebcamStream from './components/WebcamStream';
-import Login from './components/Login';
+import MultiCamera from './components/MultiCamera';
+import Analytics   from './components/Analytics';
+import Login       from './components/Login';
 import './index.css';
 
 // ─── Toast Context ─────────────────────────────────────────────
@@ -13,12 +15,12 @@ function ToastProvider({ children }) {
     const [toasts, setToasts] = useState([]);
 
     const addToast = useCallback((msg, type = 'info', duration = 4000) => {
-        const id = Date.now();
+        const id = Date.now() + Math.random();
         setToasts(prev => [...prev, { id, msg, type }]);
         setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), duration);
     }, []);
 
-    const icons = { success: '✅', error: '❌', warning: '⚠️', info: 'ℹ️' };
+    const icons = { success:'✅', error:'❌', warning:'⚠️', info:'ℹ️' };
 
     return (
         <ToastContext.Provider value={addToast}>
@@ -38,8 +40,8 @@ function ToastProvider({ children }) {
 // ─── App ───────────────────────────────────────────────────────
 function App() {
     const [activeTab, setActiveTab] = useState('dashboard');
-    const [user,     setUser]  = useState(null);
-    const [token,    setToken] = useState(() => localStorage.getItem('token'));
+    const [user,  setUser]  = useState(null);
+    const [token, setToken] = useState(() => localStorage.getItem('token'));
 
     useEffect(() => {
         const savedUser = localStorage.getItem('user');
@@ -64,13 +66,16 @@ function App() {
         setActiveTab('dashboard');
     };
 
-    if (!token) {
-        return (
-            <ToastProvider>
-                <Login onLogin={handleLogin} />
-            </ToastProvider>
-        );
-    }
+    if (!token) return (
+        <ToastProvider>
+            <Login onLogin={handleLogin} />
+        </ToastProvider>
+    );
+
+    const role = user?.role;
+    const isAdmin  = role === 'admin';
+    const isPolice = role === 'police';
+    const isCCTV   = role === 'cctv_user';
 
     return (
         <ToastProvider>
@@ -83,9 +88,11 @@ function App() {
                     token={token}
                 />
                 <main className="main-content">
-                    {activeTab === 'dashboard' && <Dashboard user={user} token={token} />}
-                    {activeTab === 'webcam'    && (user?.role === 'admin' || user?.role === 'cctv_user') && <WebcamStream token={token} />}
-                    {activeTab === 'upload'    && <VideoUpload token={token} />}
+                    {activeTab === 'dashboard'    && <Dashboard    user={user} token={token} />}
+                    {activeTab === 'analytics'    && <Analytics    token={token} />}
+                    {activeTab === 'webcam'       && (isAdmin||isCCTV) && <WebcamStream token={token} />}
+                    {activeTab === 'multicam'     && (isAdmin||isCCTV) && <MultiCamera  token={token} />}
+                    {activeTab === 'upload'       && <VideoUpload  token={token} />}
                 </main>
             </div>
         </ToastProvider>
