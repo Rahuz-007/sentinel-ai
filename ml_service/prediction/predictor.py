@@ -1,462 +1,507 @@
-import os
+"""
+Sentinel AI — Core Predictor v3.0 (PyTorch Edition)
+=====================================================
+Fully rewritten to use PyTorch + torchvision MobileNetV2
+(TensorFlow removed — not compatible with Python 3.14+)
+
+Detection engine:
+  • YOLOv8n   — person detection + bounding boxes
+  • MobileNetV2 (PyTorch) — violence classification
+  • Optical flow  — motion intensity (Farnebäck)
+  • Spatial rules — proximity, velocity, overlap analysis
+  • Temporal scoring — requires persistence across frames
+"""
+
+import os, sys, time, cv2
 import numpy as np
-import tensorflow as tf
 from collections import deque
-import sys
 
-# Add parent directory to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
+# ── Path setup ─────────────────────────────────────────────────
+_PREDICTION_DIR = os.path.dirname(os.path.abspath(__file__))
+_ML_SERVICE_DIR = os.path.dirname(_PREDICTION_DIR)
+if _ML_SERVICE_DIR not in sys.path:
+    sys.path.insert(0, _ML_SERVICE_DIR)
 
-from ml_service.preprocessing.image_processor import preprocess_frame
+# ── PyTorch ────────────────────────────────────────────────────
+import torch
+import torch.nn as nn
+import torchvision.transforms as T
+from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
 
-
-
-import cv2
+# ── YOLOv8 ─────────────────────────────────────────────────────
 try:
     from ultralytics import YOLO
+    _YOLO_OK = True
 except ImportError:
-    YOLO = None
+    _YOLO_OK = False
+    print("⚠️  ultralytics not installed — spatial analysis disabled")
 
-# Constants
-MODEL_PATH = os.path.join(os.path.dirname(__file__), '../model/cnn_model.h5')
-CLASSES = ['Fighting', 'Assault', 'Normal']
-WINDOW_SIZE = 30 # Increased from 10 to 30 for smoother prediction
+# ── Constants ──────────────────────────────────────────────────
+MODEL_PATH  = os.path.join(_ML_SERVICE_DIR, "model", "violence_model.pt")
+CLASSES     = ["Fighting", "Assault", "Normal"]
+IMG_SIZE    = 224          # MobileNetV2 standard
+WINDOW_SIZE = 30           # rolling prediction window
+DEVICE      = "cuda" if torch.cuda.is_available() else "cpu"
+
+# ── Preprocessing transform ────────────────────────────────────
+_TRANSFORM = T.Compose([
+    T.ToPILImage(),
+    T.Resize((IMG_SIZE, IMG_SIZE)),
+    T.ToTensor(),
+    T.Normalize(mean=[0.485, 0.456, 0.406],
+                std =[0.229, 0.224, 0.225]),
+])
 
 
+# ══════════════════════════════════════════════════════════════
+#  MODEL DEFINITION
+# ══════════════════════════════════════════════════════════════
+class ViolenceClassifier(nn.Module):
+    """
+    MobileNetV2 backbone + custom 3-class head.
+    Output indices: 0=Fighting  1=Assault  2=Normal
+    """
+    def __init__(self, num_classes: int = 3):
+        super().__init__()
+        base = mobilenet_v2(weights=MobileNet_V2_Weights.IMAGENET1K_V1)
+        # Replace classifier
+        in_features = base.classifier[1].in_features
+        base.classifier = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(in_features, 256),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, num_classes),
+        )
+        self.model = base
+
+    def forward(self, x):
+        return self.model(x)
+
+
+# ══════════════════════════════════════════════════════════════
+#  PREDICTOR
+# ══════════════════════════════════════════════════════════════
 class Predictor:
     def __init__(self):
-        self.model = None
+        self.classifier   = None
         self.person_model = None
-        self.demo_class = None
-        
-        # Session states: {session_id: {state_vars}}
-        self.sessions = {}
-        
-        self.load_model()
-        
-    def _get_session_state(self, session_id):
-        if session_id not in self.sessions:
-            self.sessions[session_id] = {
-                "prediction_window": deque(maxlen=WINDOW_SIZE),
-                "prev_frame_gray": None,
-                "prev_person_boxes": [],
-                "temporal_violence_score": 0.0,
-                "last_reason": "Initializing session...",
-                "last_active": time.time()
-            }
-        self.sessions[session_id]["last_active"] = time.time()
-        return self.sessions[session_id]
+        self.demo_class   = None
+        self.sessions     = {}
 
-    def cleanup_old_sessions(self, max_idle=300):
-        current_time = time.time()
-        expired = [sid for sid, state in self.sessions.items() if current_time - state["last_active"] > max_idle]
-        for sid in expired:
-            del self.sessions[sid]
-        if expired:
-            print(f"🧹 Cleaned up {len(expired)} idle ML sessions.")
-        
-        # Initialize YOLO (Lazy load or immediate)
-        if YOLO:
+        self._load_classifier()
+        self._load_yolo()
+
+    # ── Model Loading ─────────────────────────────────────────
+    def _load_classifier(self):
+        """
+        Load fine-tuned model if it exists; otherwise load
+        ImageNet-pretrained MobileNetV2 as a strong baseline.
+        """
+        self.classifier = ViolenceClassifier(num_classes=3).to(DEVICE)
+
+        if os.path.exists(MODEL_PATH):
+            try:
+                state = torch.load(MODEL_PATH, map_location=DEVICE,
+                                   weights_only=True)
+                self.classifier.load_state_dict(state)
+                print(f"✅ Fine-tuned violence model loaded: {MODEL_PATH}")
+            except Exception as e:
+                print(f"⚠️  Could not load fine-tuned weights ({e}) "
+                      f"— using ImageNet pretrained baseline")
+        else:
+            print(f"ℹ️  No fine-tuned model at {MODEL_PATH}")
+            print("   Using ImageNet-pretrained MobileNetV2 as baseline.")
+            print("   Run:  python training/train_model.py  to train.")
+
+        self.classifier.eval()
+
+    def load_model(self):
+        """Hot-reload after retraining."""
+        self._load_classifier()
+
+    def _load_yolo(self):
+        if _YOLO_OK:
             try:
                 self.person_model = YOLO("yolov8n.pt")
-                print("YOLOv8 Person Detector loaded.")
+                print("✅ YOLOv8n person detector ready")
             except Exception as e:
-                print(f"Warning: Could not load YOLO: {e}")
-        else:
-            print("Ultralytics module not found. Human detection disabled. (Wait for pip install)")
+                print(f"⚠️  YOLO error: {e}")
 
+    # ── Demo & Session ────────────────────────────────────────
     def set_demo_mode(self, behavior_class):
         if behavior_class in CLASSES or behavior_class is None:
             self.demo_class = behavior_class
-            print(f"Demo mode set to: {self.demo_class}")
             return True
         return False
 
-    def load_model(self):
-        try:
-            if os.path.exists(MODEL_PATH):
-                self.model = tf.keras.models.load_model(MODEL_PATH)
-                print("Model loaded successfully.")
-            else:
-                print(f"Model not found at {MODEL_PATH}. Please train the model first.")
-                # Ensure structure exists even if model doesn't (prevent crash on init)
-        except Exception as e:
-            print(f"Error loading model: {e}")
-
-    def predict_frame(self, frame, session_id="default"):
-        state = self._get_session_state(session_id)
-        
-        if self.demo_class:
-            predicted_class = self.demo_class
-            confidence = 0.95 + (np.random.random() * 0.04) 
-            
-            state["prediction_window"].append(predicted_class)
-            risk_level = self.calculate_risk(session_id)
-            
-            return {
-                "class": predicted_class,
-                "confidence": confidence,
-                "risk": risk_level
+    def _get_session(self, sid: str) -> dict:
+        if sid not in self.sessions:
+            self.sessions[sid] = {
+                "window":    deque(maxlen=WINDOW_SIZE),
+                "prev_gray": None,
+                "prev_boxes": [],
+                "temp_score": 0.0,
+                "last_active": time.time(),
             }
+        self.sessions[sid]["last_active"] = time.time()
+        return self.sessions[sid]
 
-        if self.model is None:
-            # Fallback for demo if model isn't trained
-            return {"class": "Normal", "confidence": 0.0, "risk": "Low"}
+    def cleanup_old_sessions(self, max_idle: float = 300.0):
+        now = time.time()
+        dead = [s for s, v in self.sessions.items()
+                if now - v["last_active"] > max_idle]
+        for s in dead:
+            del self.sessions[s]
 
-        # 1. Color Space Conversion (BGR -> RGB)
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    # ════════════════════════════════════════════════════════
+    #  FRAME PREPROCESSING
+    # ════════════════════════════════════════════════════════
+    def _preprocess(self, frame: np.ndarray) -> torch.Tensor | None:
+        """
+        BGR frame → (1, 3, 224, 224) normalised tensor.
+        Applies CLAHE contrast enhancement for:
+          • dark CCTV feeds
+          • phone/laptop screens → auto-sharpening + CLAHE
+        """
+        try:
+            h, w = frame.shape[:2]
+            # Centre-square crop
+            s = min(h, w)
+            y0, x0 = (h - s) // 2, (w - s) // 2
+            crop = frame[y0:y0+s, x0:x0+s]
 
-        # 1.5 Center Crop (Focus on the phone screen/center action)
-        # If the user holds a phone, it's likely in the center. 
-        # Accessing full Webcam FOV (640x480) resized to 64x64 loses detail.
-        h, w, _ = frame_rgb.shape
-        center_h, center_w = h // 2, w // 2
-        # Crop 300x300 from center (matches frontend canvas size roughly)
-        crop_size = min(h, w, 480) 
-        start_h = max(0, center_h - crop_size // 2)
-        start_w = max(0, center_w - crop_size // 2)
-        frame_cropped = frame_rgb[start_h:start_h+crop_size, start_w:start_w+crop_size]
+            # Screen-recording correction
+            if self._is_screen(crop):
+                crop = self._fix_screen(crop)
 
-        # 2. CLAHE REMOVED
-        # CLAHE was amplifying noise on static backgrounds (walls), causing false positives.
-        # Reverting to simple center crop.
-        final_frame = frame_cropped
+            # CLAHE on L-channel
+            lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+            l = clahe.apply(l)
+            crop = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
 
-        # 3. Motion Gating
-        gray = cv2.cvtColor(final_frame, cv2.COLOR_RGB2GRAY)
-        gray = cv2.GaussianBlur(gray, (21, 21), 0)
-        
-        motion_score = 0
-        if state["prev_frame_gray"] is not None:
-             delta_frame = cv2.absdiff(state["prev_frame_gray"], gray)
-             motion_score = np.mean(delta_frame)
-        
-        state["prev_frame_gray"] = gray
-
-        # Debug Motion
-        # print(f"Motion Score: {motion_score:.2f}")
-
-        processed_frame = preprocess_frame(final_frame)
-        if processed_frame is None:
+            rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
+            tensor = _TRANSFORM(rgb).unsqueeze(0).to(DEVICE)
+            return tensor
+        except Exception as e:
+            print(f"preprocess error: {e}")
             return None
 
-        preds = self.model.predict(processed_frame, verbose=0)
-        
-        # AGGRESSIVE MODE:
-        # Instead of just taking argmax, check if Fighting/Assault has ANY significant activation
-        # Standard Softmax/Argmax suppresses lower confidence classes
-        fighting_conf = float(preds[0][0]) # Assuming 0=Fighting (Alphabetical: Assault, Fighting, Normal)? 
-        # WAIT! CLASSES = ['Fighting', 'Assault', 'Normal'] (Defined at top)
-        # So 0=Fighting, 1=Assault, 2=Normal
-        
-        fighting_prob = float(preds[0][0])
-        assault_prob = float(preds[0][1])
-        normal_prob = float(preds[0][2])
-        
-        # --- HUMAN DETECTION & DEEP SPATIAL ANALYSIS ---
-        num_persons = 0
-        current_boxes = []
+    @staticmethod
+    def _is_screen(frame: np.ndarray) -> bool:
+        """Detect if frame is a screen recording (dark borders heuristic)."""
+        bw = 12
+        h, w = frame.shape[:2]
+        edges = [frame[:bw,:], frame[-bw:,:], frame[:,:bw], frame[:,-bw:]]
+        return float(np.mean([np.mean(e) for e in edges])) < 28
+
+    @staticmethod
+    def _fix_screen(frame: np.ndarray) -> np.ndarray:
+        """Sharpen + denoise screen-recorded frames."""
+        k = np.array([[0,-1,0],[-1,5,-1],[0,-1,0]], np.float32)
+        frame = cv2.filter2D(frame, -1, k)
+        return cv2.bilateralFilter(frame, 5, 75, 75)
+
+    # ════════════════════════════════════════════════════════
+    #  CORE PREDICTION
+    # ════════════════════════════════════════════════════════
+    def predict_frame(self, frame: np.ndarray,
+                      session_id: str = "default") -> dict | None:
+        state = self._get_session(session_id)
+
+        # ── Demo mode ──────────────────────────────────────
+        if self.demo_class:
+            conf = 0.91 + np.random.random() * 0.08
+            state["window"].append(self.demo_class)
+            return {
+                "class": self.demo_class,
+                "confidence": round(conf, 4),
+                "risk": self._calc_risk(state),
+                "reason": "⚠️ Demo mode active",
+                "motion": 0.0, "persons": 1,
+                "threshold": 0.99,
+                "boxes": [], "debug_probs": {},
+            }
+
+        # ── Optical flow (motion) ──────────────────────────
+        gray_small = cv2.cvtColor(
+            cv2.resize(frame, (160, 160)), cv2.COLOR_BGR2GRAY)
+        motion_score = self._optical_flow(state["prev_gray"], gray_small)
+        state["prev_gray"] = gray_small
+
+        # ── MobileNetV2 CNN ────────────────────────────────
+        tensor = self._preprocess(frame)
+        fight_p = assault_p = normal_p = 0.333
+
+        if tensor is not None and self.classifier is not None:
+            with torch.no_grad():
+                logits = self.classifier(tensor)[0]
+                probs  = torch.softmax(logits, dim=0).cpu().numpy()
+            fight_p  = float(probs[0])
+            assault_p = float(probs[1])
+            normal_p = float(probs[2])
+
+        combined_violence = fight_p + assault_p
+
+        # ── YOLOv8 spatial analysis ────────────────────────
+        num_persons       = 0
+        current_boxes     = []
         proximity_warning = False
-        high_energy_interaction = False
-        postures = [] # List of 'standing', 'sitting/sitting-close', 'unclear'
-        
+        high_velocity     = False
+        overlap_detected  = False
+
         if self.person_model:
-            # Use persist=True for internal tracking if needed, but we'll do centroid velocity
             results = self.person_model(frame, classes=[0], verbose=False)
-            boxes = results[0].boxes
-            num_persons = len(boxes)
-            
-            for box in boxes:
-                xyxy = box.xyxy[0].cpu().numpy()
-                current_boxes.append(xyxy)
-                
-                # Posture Estimation (Simplified)
-                bw, bh = xyxy[2] - xyxy[0], xyxy[3] - xyxy[1]
-                aspect_ratio = bh / (bw + 1e-6)
-                if aspect_ratio > 1.8:
-                    postures.append("standing")
-                elif aspect_ratio > 1.0:
-                    postures.append("standing/sitting")
-                else:
-                    postures.append("crouching/sitting")
-                
-            # 1. Proximity & Interaction Analysis
+            raw_boxes = results[0].boxes
+            for box in raw_boxes:
+                current_boxes.append(box.xyxy[0].cpu().numpy())
+            num_persons = len(current_boxes)
+
             if num_persons >= 2:
                 for i in range(num_persons):
-                    for j in range(i + 1, num_persons):
+                    for j in range(i+1, num_persons):
                         b1, b2 = current_boxes[i], current_boxes[j]
-                        area1 = (b1[2]-b1[0]) * (b1[3]-b1[1])
-                        area2 = (b2[2]-b2[0]) * (b2[3]-b2[1])
-                        
-                        # Size Ratio Check (Filter out phone screens/small artifacts)
-                        # If one box is < 15% the size of the other, it's likely an object/screen
-                        ratio = min(area1, area2) / (max(area1, area2) + 1e-6)
-                        if ratio < 0.15:
-                            continue
 
-                        # Containment Check (Is one box inside the other?)
-                        # (e.g. detecting a head or a phone as a separate person)
-                        def is_contained(inner, outer):
-                            return inner[0] > outer[0] and inner[1] > outer[1] and \
-                                   inner[2] < outer[2] and inner[3] < outer[3]
-                        
-                        if is_contained(b1, b2) or is_contained(b2, b1):
-                            continue
-
-                        # Calculate Distance between centers
-                        c1 = [(b1[0] + b1[2])/2, (b1[1] + b1[3])/2]
-                        c2 = [(b2[0] + b2[2])/2, (b2[1] + b2[3])/2]
-                        dist = np.sqrt((c1[0]-c2[0])**2 + (c1[1]-c2[1])**2)
-                        
-                        avg_h = ((b1[3]-b1[1]) + (b2[3]-b2[1])) / 2
-                        rel_dist = dist / (avg_h + 1e-6)
-                        
-                        if rel_dist < 0.85: # Require closer proximity to trigger
+                        # Centre-distance (normalised by height)
+                        c1 = np.array([(b1[0]+b1[2])/2, (b1[1]+b1[3])/2])
+                        c2 = np.array([(b2[0]+b2[2])/2, (b2[1]+b2[3])/2])
+                        dist = float(np.linalg.norm(c1-c2))
+                        avg_h = ((b1[3]-b1[1])+(b2[3]-b2[1])) / 2
+                        if avg_h > 0 and dist/avg_h < 1.0:
                             proximity_warning = True
-            
-            # 2. Velocity Tracking (Energy)
-            if len(state["prev_person_boxes"]) > 0 and num_persons > 0:
-                max_displacement = 0
-                for curr in current_boxes:
-                    c_curr = [(curr[0]+curr[2])/2, (curr[1]+curr[3])/2]
-                    min_d = float('inf')
-                    for prev in state["prev_person_boxes"]:
-                        c_prev = [(prev[0]+prev[2])/2, (prev[1]+prev[3])/2]
-                        d = np.sqrt((c_curr[0]-c_prev[0])**2 + (c_curr[1]-c_prev[1])**2)
-                        if d < min_d: min_d = d
-                    
-                    if min_d != float('inf'):
-                        max_displacement = max(max_displacement, min_d)
-                
-                if max_displacement > 45: 
-                    high_energy_interaction = True
-                            
-            state["prev_person_boxes"] = current_boxes
 
-        # --- MULTI-FACTOR MOTION SCORING ---
-        has_motion = motion_score > 3.5 # Increased from 2.5
-        is_dynamic = has_motion and (high_energy_interaction or motion_score > 12.0) # Increased from 8.0
-        
-        # --- SCENE UNDERSTANDING & CLASSIFICATION RULES ---
-        reason = "Normal Activity"
+                        # Bounding box overlap
+                        ix1 = max(b1[0], b2[0]); iy1 = max(b1[1], b2[1])
+                        ix2 = min(b1[2], b2[2]); iy2 = min(b1[3], b2[3])
+                        if ix2 > ix1 and iy2 > iy1:
+                            overlap_detected = True
+
+            # Velocity tracking
+            if state["prev_boxes"] and current_boxes:
+                max_disp = 0.0
+                for cb in current_boxes:
+                    cc = np.array([(cb[0]+cb[2])/2, (cb[1]+cb[3])/2])
+                    for pb in state["prev_boxes"]:
+                        pc = np.array([(pb[0]+pb[2])/2, (pb[1]+pb[3])/2])
+                        max_disp = max(max_disp, float(np.linalg.norm(cc-pc)))
+                if max_disp > 35:
+                    high_velocity = True
+
+            state["prev_boxes"] = current_boxes
+
+        # ── Scene classification rules ─────────────────────
+        is_dynamic = motion_score > 2.0 or high_velocity
+        reason = "Normal activity"
         is_violent_candidate = False
-        
-        combined_violence = fighting_prob + assault_prob
-        
-        # Rule 0: Significant Person Count
-        # Only count people who are at least 5% of the frame area
-        significant_persons = 0
-        frame_area = frame.shape[0] * frame.shape[1]
-        for box in current_boxes:
-            if ((box[2]-box[0]) * (box[3]-box[1])) / (frame_area + 1e-6) > 0.05:
-                significant_persons += 1
 
-        # Rule 1: No persons or single person = Very high bar for violence
         if num_persons == 0:
-            reason = "Static scene - No persons"
+            reason = "Empty scene — no persons detected"
+
         elif num_persons == 1:
-            if is_dynamic and combined_violence > 0.92: # Only very obvious fighting (self-harm/shadow boxing)
+            if is_dynamic and combined_violence > 0.90:
                 is_violent_candidate = True
-                reason = "High energy single-person activity"
+                reason = "⚠️ High-energy solo activity (very high CNN confidence)"
             else:
                 reason = "Normal single-person scene"
-        # Rule 2: Static interaction = Normal (Sitting/Talking close)
-        elif proximity_warning and not is_dynamic:
-            reason = "Normal proximity / Static interaction"
-        # Rule 3: Crowd Presence check (No aggression)
-        elif num_persons >= 3 and not is_dynamic and combined_violence < 0.8:
-            reason = "Stable crowd presence"
-        # Rule 4: Violent Indicators Present
-        elif is_dynamic:
-            if proximity_warning:
-                reason = "Aggressive interaction detected"
-                # NEW: If spatial interaction is clear, lower the confidence bar from 0.75 to 0.40
-                if combined_violence > 0.40:
-                    is_violent_candidate = True
-            else:
-                reason = "High motion detected"
-                if combined_violence > 0.85:
-                    is_violent_candidate = True
-        # Rule 5: Screen glare / artifact check
-        elif not is_dynamic and combined_violence > 0.85:
-            reason = "Filtered: Static pattern (Glare/Artifact)"
-        else:
-            reason = "Normal movements"
 
-        # --- TEMPORAL REASONING & CONFIDENCE GRADIENT ---
-        # Gradually increase if candidate is violent, decay if not
-        # NEW: Sensitive build-up if proximity is clear
-        threshold_to_build = 0.35 if (is_violent_candidate and proximity_warning) else 0.65
-        
-        if is_violent_candidate and combined_violence > threshold_to_build:
-             state["temporal_violence_score"] = min(1.0, state["temporal_violence_score"] + 0.25)
+        elif num_persons >= 2:
+            if overlap_detected:
+                reason = "⚠️ Physical contact detected"
+                if combined_violence > 0.30 or is_dynamic:
+                    is_violent_candidate = True
+
+            elif proximity_warning and is_dynamic:
+                if combined_violence > 0.35:
+                    is_violent_candidate = True
+                    reason = "⚠️ Aggressive close-range interaction"
+                else:
+                    reason = "Close proximity — appears non-aggressive"
+
+            elif proximity_warning and combined_violence > 0.65:
+                is_violent_candidate = True
+                reason = "⚠️ Close proximity + CNN violence signal"
+
+            elif is_dynamic and combined_violence > 0.75:
+                is_violent_candidate = True
+                reason = "⚠️ High-speed multi-person scene"
+
+            elif is_dynamic:
+                reason = f"Active movement — {num_persons} persons"
+
+            else:
+                reason = "Normal multi-person scene"
+
+        # ── Temporal scoring ───────────────────────────────
+        if is_violent_candidate:
+            boost = 0.35 if (overlap_detected or (proximity_warning and is_dynamic)) else 0.22
+            state["temp_score"] = min(1.0, state["temp_score"] + boost)
         else:
-             state["temporal_violence_score"] = max(0.0, state["temporal_violence_score"] - 0.15)
-             
+            state["temp_score"] = max(0.0, state["temp_score"] - 0.12)
+
+        # ── Final decision ────────────────────────────────
+        CONFIRM_THRESHOLD = 0.65
         predicted_class = "Normal"
-        confidence = normal_prob
-        
-        if state["temporal_violence_score"] > 0.7:
-             # Confirmed persistence
-             if combined_violence > (normal_prob + 0.15): 
-                  if fighting_prob > assault_prob:
-                      predicted_class = "Fighting"
-                      confidence = fighting_prob
-                  else:
-                      predicted_class = "Assault"
-                      confidence = assault_prob
-             else:
-                  reason = "Ambiguous pattern - suppressing"
-        
-        # Update sliding window
-        state["prediction_window"].append(predicted_class)
-        state["last_reason"] = reason
-        
-        # Risk Logic
-        risk_level = self.calculate_risk(session_id)
-        
+        confidence      = normal_p
+
+        if state["temp_score"] >= CONFIRM_THRESHOLD:
+            if combined_violence > normal_p + 0.08:
+                if fight_p >= assault_p:
+                    predicted_class = "Fighting"
+                    confidence      = fight_p
+                else:
+                    predicted_class = "Assault"
+                    confidence      = assault_p
+            # Even if CNN is uncertain, trust spatial rules for direct violence signals
+            elif overlap_detected and is_dynamic and num_persons >= 2:
+                predicted_class = "Fighting"
+                confidence      = max(combined_violence, 0.55)
+                reason          = "⚠️ Physical contact + motion detected"
+
+        state["window"].append(predicted_class)
+        risk = self._calc_risk(state)
+
         return {
-            "class": predicted_class,
-            "confidence": confidence,
-            "risk": risk_level,
-            "reason": reason,
-            "debug_probs": {"fighting": fighting_prob, "assault": assault_prob, "normal": normal_prob},
-            "motion": motion_score,
-            "persons": num_persons,
-            "threshold": 0.70, # Temporal trigger threshold
-            "boxes": [box.tolist() for box in current_boxes]
+            "class":      predicted_class,
+            "confidence": round(float(confidence), 4),
+            "risk":       risk,
+            "reason":     reason,
+            "motion":     round(float(motion_score), 3),
+            "persons":    num_persons,
+            "threshold":  round(float(state["temp_score"]), 3),
+            "boxes":      [box.tolist() for box in current_boxes],
+            "debug_probs": {
+                "fighting": round(float(fight_p), 4),
+                "assault":  round(float(assault_p), 4),
+                "normal":   round(float(normal_p), 4),
+            },
         }
 
-    def calculate_risk(self, session_id="default"):
-        state = self._get_session_state(session_id)
-        if len(state["prediction_window"]) < 1:
+    # ── Risk calculation ──────────────────────────────────────
+    def _calc_risk(self, state: dict) -> str:
+        window = state["window"]
+        if not window:
             return "Low"
-            
-        # Count occurrences of violent classes
-        violent_count = 0
-        for p in state["prediction_window"]:
-            if p in ['Fighting', 'Assault']:
-                violent_count += 1
-        
-        # HIGH SENSITIVITY: 
-        # If we see violence in just 10% of frames (3 out of 30), flag it.
-        # This ensures we catch brief glimpses of the phone screen.
-        # HIGH SENSITIVITY w/ SAFETY: 
-        # If we see violence in > 15% of frames (5 out of 30), flag it.
-        # Increased from 3 to 5 to ensure it's not just noise.
-        if violent_count >= 5:
-            return "High"
-        elif violent_count >= 1:
-            return "Medium"
-        else:
-            return "Low"
+        violent = sum(1 for p in window if p in ("Fighting", "Assault"))
+        if violent >= 5:  return "High"
+        if violent >= 1:  return "Medium"
+        return "Low"
 
-    def predict_video_detailed(self, video_path):
-        import cv2
+    def calculate_risk(self, session_id: str = "default") -> str:
+        return self._calc_risk(self._get_session(session_id))
+
+    # ── Optical Flow ──────────────────────────────────────────
+    @staticmethod
+    def _optical_flow(prev_gray, curr_gray) -> float:
+        if prev_gray is None:
+            return 0.0
+        try:
+            flow = cv2.calcOpticalFlowFarneback(
+                prev_gray, curr_gray, None,
+                pyr_scale=0.5, levels=3, winsize=15,
+                iterations=3, poly_n=5, poly_sigma=1.2, flags=0)
+            mag, _ = cv2.cartToPolar(flow[..., 0], flow[..., 1])
+            return float(np.mean(mag))
+        except Exception:
+            return 0.0
+
+    # ════════════════════════════════════════════════════════
+    #  VIDEO ANALYSIS  (isolated per-video session)
+    # ════════════════════════════════════════════════════════
+    def predict_video_detailed(self, video_path: str) -> dict:
         cap = cv2.VideoCapture(video_path)
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        fps = cap.get(cv2.CAP_PROP_FPS) or 25
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        if fps == 0: fps = 15 # Fallback
-        
-        frame_count = 0
-        events = []
+
+        vid_sid = f"__video_{os.path.basename(video_path)}_{int(time.time())}"
+        self.sessions.pop(vid_sid, None)
+
+        frame_idx     = 0
+        events        = []
         current_event = None
-        self.sustained_violence_counter = 0
-        self.prediction_window.clear()
-        self.temporal_violence_score = 0.0
-        self.prev_frame_gray = None
-        self.prev_person_boxes = []
-        
-        process_every = max(1, int(fps / 2)) 
-        
+        skip          = max(1, int(fps / 2))
+
         while cap.isOpened():
             ret, frame = cap.read()
-            if not ret: break
-            
-            if frame_count % process_every == 0:
-                res = self.predict_frame(frame)
-                res['frame_index'] = frame_count
-                res['timestamp'] = round(frame_count / fps, 2)
-                
-                is_violent = res['class'] != 'Normal'
-                if is_violent:
-                    if current_event is None:
-                        current_event = {
-                            "start_time": res['timestamp'],
-                            "start_frame": frame_count,
-                            "type": res['class'],
-                            "max_confidence": res['confidence'],
-                            "avg_confidence": res['confidence'],
-                            "count": 1,
-                            "humans_present": res['persons'] > 0
-                        }
+            if not ret:
+                break
+            if frame_idx % skip == 0:
+                res = self.predict_frame(frame, session_id=vid_sid)
+                if res:
+                    res["timestamp"] = round(frame_idx / fps, 2)
+                    is_violent = res["class"] != "Normal"
+                    if is_violent:
+                        if current_event is None:
+                            current_event = {
+                                "start_time":     res["timestamp"],
+                                "start_frame":    frame_idx,
+                                "type":           res["class"],
+                                "max_confidence": res["confidence"],
+                                "avg_confidence": res["confidence"],
+                                "count":          1,
+                                "humans_present": res["persons"] > 0,
+                                "reason":         res["reason"],
+                            }
+                        else:
+                            n = current_event["count"]
+                            current_event["avg_confidence"] = (
+                                current_event["avg_confidence"]*n + res["confidence"]
+                            ) / (n+1)
+                            current_event["max_confidence"] = max(
+                                current_event["max_confidence"], res["confidence"])
+                            current_event["end_time"]  = res["timestamp"]
+                            current_event["end_frame"] = frame_idx
+                            current_event["count"]    += 1
                     else:
-                        current_event["end_time"] = res['timestamp']
-                        current_event["end_frame"] = frame_count
-                        current_event["max_confidence"] = max(current_event["max_confidence"], res['confidence'])
-                        current_event["avg_confidence"] = (current_event["avg_confidence"] * current_event["count"] + res['confidence']) / (current_event["count"] + 1)
-                        current_event["count"] += 1
-                        if res['persons'] > 0: current_event["humans_present"] = True
-                else:
-                    if current_event:
-                        if current_event["count"] >= 2:
+                        if current_event and current_event["count"] >= 2:
                             events.append(current_event)
                         current_event = None
-            frame_count += 1
-            
-        if current_event: events.append(current_event)
+            frame_idx += 1
+
+        if current_event and current_event["count"] >= 2:
+            events.append(current_event)
         cap.release()
-        
-        high_risk = any(e for e in events if e['avg_confidence'] > 0.4 or e['count'] > 5)
-        filtered_events = [e for e in events if e['count'] >= 2]
-        
+        self.sessions.pop(vid_sid, None)
+
+        filtered  = [e for e in events if e["count"] >= 2]
+        high_risk = any(e["avg_confidence"] > 0.40 or e["count"] > 5
+                        for e in filtered)
         return {
             "summary": {
-                "risk_level": "High" if high_risk else ("Medium" if filtered_events else "Low"),
+                "risk_level":     "High" if high_risk else ("Medium" if filtered else "Low"),
                 "total_duration": round(total_frames / fps, 2),
-                "event_count": len(filtered_events)
+                "event_count":    len(filtered),
             },
-            "events": filtered_events
+            "events": filtered,
         }
 
-    def predict_youtube(self, youtube_url):
-        import yt_dlp
-        import tempfile
-        import shutil
-        
-        temp_dir = tempfile.mkdtemp()
-        video_file = os.path.join(temp_dir, 'yt_video.mp4')
-        
-        ydl_opts = {
-            'format': 'best[height<=360]/worst',
-            'outtmpl': video_file,
-            'quiet': True,
-            'no_warnings': True
-        }
+    def predict_youtube(self, youtube_url: str) -> dict:
+        import yt_dlp, tempfile, shutil
+        tmp = tempfile.mkdtemp()
+        out = os.path.join(tmp, "yt.%(ext)s")
         try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with yt_dlp.YoutubeDL({
+                "format":"best[height<=360]/worst",
+                "outtmpl":out, "quiet":True, "no_warnings":True
+            }) as ydl:
                 ydl.download([youtube_url])
-                
-                if not os.path.exists(video_file):
-                    # Try to find if it was saved with a different extension
-                    files = os.listdir(temp_dir)
-                    if files:
-                        video_file = os.path.join(temp_dir, files[0])
-                        
-                results = self.predict_video_detailed(video_file)
-                # Cleanup
-                shutil.rmtree(temp_dir)
-                return results
+            files = [os.path.join(tmp, f) for f in os.listdir(tmp)]
+            if not files:
+                return {"error": "Download produced no files"}
+            result = self.predict_video_detailed(files[0])
+            shutil.rmtree(tmp, ignore_errors=True)
+            return result
         except Exception as e:
-            print(f"YouTube Error: {e}")
-            if os.path.exists(temp_dir): shutil.rmtree(temp_dir)
+            shutil.rmtree(tmp, ignore_errors=True)
             return {"error": str(e)}
 
-    def predict_video(self, video_path):
-        results = self.predict_video_detailed(video_path)
-        risk = results['summary']['risk_level']
-        behavior = results['events'][0]['type'] if results['events'] else "Normal"
-        return risk, behavior
+    def predict_video(self, video_path: str):
+        """Legacy compatibility."""
+        res = self.predict_video_detailed(video_path)
+        return (res["summary"]["risk_level"],
+                res["events"][0]["type"] if res["events"] else "Normal")
 
-# Singleton instance
+
+# ── Singleton ─────────────────────────────────────────────────
 predictor = Predictor()

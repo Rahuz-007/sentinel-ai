@@ -8,7 +8,6 @@ env/
 venv/
 ENV/
 *.egg-info/
-dist/
 build/
 *.log
 *.pkl
@@ -49,10 +48,21 @@ Thumbs.db
 uploads/
 temp/
 tmp/
+*.webm
+*.mp4
+*.avi
+*.mov
+temp_incident.*
 
-# Datasets (if large)
+# Datasets (large — excluded from git)
 ml_service/dataset/
 dataset/
+
+# Trained model weights (large binary files)
+ml_service/model/*.h5
+ml_service/model/*.pt
+ml_service/model/*.pth
+ml_service/model/training_history.json
 
 # MongoDB
 data/
@@ -61,5 +71,14 @@ data/
 logs/
 *.log
 ml_service.log
+ml_service/ml_service.log
+sentinel.log
 server.log
 frontend.log
+
+# Kaggle credentials (NEVER commit)
+kaggle.json
+.kaggle/
+
+# YOLOv8 auto-downloaded weights
+yolov8*.pt

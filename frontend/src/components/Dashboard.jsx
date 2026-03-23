@@ -1,235 +1,345 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useContext, useCallback } from 'react';
 import axios from 'axios';
+import { io } from 'socket.io-client';
+import { ToastContext } from '../App';
 
-const Dashboard = ({ user }) => {
-    const [alerts, setAlerts] = useState([]);
+const API = import.meta.env.VITE_API_URL || 'http://localhost:4005';
+
+// ─── Helper formatters ────────────────────────────────────────
+const relTime = (ts) => {
+    const diff = Math.floor((Date.now() - new Date(ts)) / 1000);
+    if (diff < 60)  return `${diff}s ago`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+    return new Date(ts).toLocaleTimeString();
+};
+
+const RISK_CLASS  = { High: 'high', Medium: 'medium', Low: 'low' };
+const STATUS_SLUG = (s) => s.toLowerCase().replace(' ', '_');
+
+const STATUSES = {
+    admin:     ['Investigating', 'Resolved', 'False Alarm'],
+    police:    ['Investigating', 'Resolved'],
+    cctv_user: ['Verified', 'Reported', 'False Alarm'],
+};
+
+// ─── Stats Card ───────────────────────────────────────────────
+function StatCard({ label, value, color, icon, loading }) {
+    return (
+        <div className={`stat-card ${color}`}>
+            <div className="stat-label">{label}</div>
+            <div className="stat-value">{loading ? '—' : value ?? 0}</div>
+            <div className="stat-icon">{icon}</div>
+        </div>
+    );
+}
+
+// ─── Main Dashboard ───────────────────────────────────────────
+export default function Dashboard({ user, token }) {
+    const toast = useContext(ToastContext);
+    const [alerts,  setAlerts]  = useState([]);
+    const [stats,   setStats]   = useState(null);
     const [loading, setLoading] = useState(true);
+    const [filter,  setFilter]  = useState({ search: '', risk: '', status: '' });
+    const [socket,  setSocket]  = useState(null);
 
-    const fetchAlerts = async () => {
+    const authHeader = { headers: { 'x-auth-token': token } };
+
+    // ── Fetch ──────────────────────────────────────────────────
+    const fetchData = useCallback(async () => {
         try {
-            const url = import.meta.env.VITE_API_URL || 'http://localhost:4005';
-            // Include role in query to handle filtering
-            const response = await axios.get(`${url}/api/alerts?role=${user?.role || 'user'}`);
-            setAlerts(response.data);
+            const [aRes, sRes] = await Promise.all([
+                axios.get(`${API}/api/alerts`, authHeader),
+                axios.get(`${API}/api/stats`,  authHeader),
+            ]);
+            setAlerts(aRes.data);
+            setStats(sRes.data);
+        } catch (err) {
+            console.error('Fetch error:', err.message);
+        } finally {
             setLoading(false);
-        } catch (error) {
-            console.error("Error fetching alerts:", error);
-            setLoading(false);
         }
-    };
+    }, [token]);
 
-    const clearHistory = async () => {
-        if (!window.confirm("This will hide all current history from your view. Police will still have access to reported incidents. Continue?")) return;
-        try {
-            const url = import.meta.env.VITE_API_URL || 'http://localhost:4005';
-            await axios.delete(`${url}/api/alerts/history`);
-            fetchAlerts();
-        } catch (error) {
-            alert("Failed to clear history");
-        }
-    };
+    // ── Socket.IO real-time updates ───────────────────────────
+    useEffect(() => {
+        fetchData();
 
-    const clearFalseAlarms = async () => {
-        if (!window.confirm("Clear all cases marked as 'False Alarm' from history?")) return;
-        try {
-            const url = import.meta.env.VITE_API_URL || 'http://localhost:4005';
-            await axios.delete(`${url}/api/alerts/false-alarms`);
-            fetchAlerts();
-        } catch (error) {
-            alert("Failed to clear false alarms");
-        }
-    };
+        const sock = io(API, { transports: ['websocket', 'polling'] });
 
-    const updateStatus = async (id, newStatus) => {
+        sock.on('connect', () => console.log('✅ Socket connected'));
+
+        sock.on('new_alert', (payload) => {
+            if (payload?.type === 'new_alert' && payload?.alert) {
+                setAlerts(prev => [payload.alert, ...prev]);
+                setStats(prev => prev ? { ...prev, total: (prev.total || 0) + 1,
+                    ...(payload.alert.riskLevel === 'High' ? { highRisk: (prev.highRisk || 0) + 1 } : {})
+                } : prev);
+                toast?.(`🚨 New ${payload.alert.riskLevel} alert: ${payload.alert.behavior}`,
+                    payload.alert.riskLevel === 'High' ? 'error' : 'warning', 6000);
+            } else if (payload?.type === 'status_update') {
+                setAlerts(prev => prev.map(a => a._id === payload.alert._id ? payload.alert : a));
+            }
+        });
+
+        setSocket(sock);
+        return () => sock.disconnect();
+    }, [fetchData]);
+
+    // ── Actions ────────────────────────────────────────────────
+    const updateStatus = async (id, status) => {
         try {
-            const url = import.meta.env.VITE_API_URL || 'http://localhost:4005';
-            await axios.put(`${url}/api/alerts/${id}`, { status: newStatus });
-            fetchAlerts(); // Refresh
-        } catch (error) {
-            console.error("Error updating status:", error);
-            alert("Failed to update status");
-        }
+            await axios.put(`${API}/api/alerts/${id}`, { status }, authHeader);
+            setAlerts(prev => prev.map(a => a._id === id ? { ...a, status } : a));
+            toast?.(`Status updated → ${status}`, 'success');
+        } catch { toast?.('Failed to update status', 'error'); }
     };
 
     const deleteAlert = async (id) => {
-        if (!window.confirm("PERMANENT DELETE: Are you sure? This will remove the case from the database and all audit logs.")) return;
+        if (!window.confirm('Permanently delete this alert? This cannot be undone.')) return;
         try {
-            const url = import.meta.env.VITE_API_URL || 'http://localhost:4005';
-            await axios.delete(`${url}/api/alerts/${id}`);
-            fetchAlerts(); // Refresh list
-        } catch (error) {
-            console.error("Error deleting alert:", error);
-            alert("Failed to delete alert");
+            await axios.delete(`${API}/api/alerts/${id}`, authHeader);
+            setAlerts(prev => prev.filter(a => a._id !== id));
+            toast?.('Alert deleted', 'success');
+        } catch { toast?.('Failed to delete alert', 'error'); }
+    };
+
+    const clearHistory = async () => {
+        if (!window.confirm('Hide all history from your view?')) return;
+        try {
+            await axios.delete(`${API}/api/alerts/history`, authHeader);
+            fetchData();
+            toast?.('History cleared from view', 'info');
+        } catch { toast?.('Failed to clear history', 'error'); }
+    };
+
+    const clearFalseAlarms = async () => {
+        try {
+            await axios.delete(`${API}/api/alerts/false-alarms`, authHeader);
+            fetchData();
+            toast?.('False alarms cleared', 'success');
+        } catch { toast?.('Failed to clear false alarms', 'error'); }
+    };
+
+    // ── Filtering ──────────────────────────────────────────────
+    const filtered = alerts.filter(a => {
+        if (filter.risk   && a.riskLevel !== filter.risk)  return false;
+        if (filter.status && a.status    !== filter.status) return false;
+        if (filter.search) {
+            const q = filter.search.toLowerCase();
+            if (!a.behavior?.toLowerCase().includes(q) && !a.videoName?.toLowerCase().includes(q)) return false;
         }
-    };
+        return true;
+    });
 
-    useEffect(() => {
-        fetchAlerts();
-        const interval = setInterval(fetchAlerts, 2000); // Polling every 2s
-        return () => clearInterval(interval);
-    }, []);
-
-    const getRiskBadge = (risk) => {
-        const className = `badge risk-${risk.toLowerCase()}`;
-        return <span className={className}>{risk}</span>;
-    };
+    const isHigh = (a) => a.riskLevel === 'High';
+    const actions = STATUSES[user?.role] || [];
+    const isAdmin  = user?.role === 'admin';
+    const isPolice = user?.role === 'police';
 
     return (
-        <div className="dashboard-container">
-            <header className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div>
+            {/* Header */}
+            <div className="dashboard-header">
                 <div>
-                    <h2>Live Security Dashboard {user?.role === 'police' && "(Audit View)"}</h2>
-                    <p>Real-time behavioral anomalies and risk assessment.</p>
-                </div>
-                {user?.role !== 'police' && (
-                    <div style={{ display: 'flex', gap: '10px' }}>
-                        <button
-                            onClick={clearFalseAlarms}
-                            style={{ background: '#7f8c8d', color: 'white', border: 'none', padding: '8px 15px', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}
-                        >
-                            🚫 Clear False Alarms
-                        </button>
-                        <button
-                            onClick={clearHistory}
-                            style={{ background: '#e74c3c', color: 'white', border: 'none', padding: '8px 15px', borderRadius: '5px', cursor: 'pointer', fontWeight: 'bold' }}
-                        >
-                            🗑️ Clear All History
-                        </button>
+                    <div className="page-title">
+                        ⚡ Security Dashboard
+                        {(isPolice) && <span style={{ fontSize: '0.75rem', color: 'var(--cyan)', marginLeft: 10 }}>AUDIT VIEW</span>}
                     </div>
-                )}
-            </header>
+                    <div className="page-subtitle">Real-time behavioral anomaly detection and incident management</div>
+                </div>
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                    <div className="live-badge">
+                        <div className="status-dot" /> Live
+                    </div>
+                    {isAdmin && (
+                        <>
+                            <button className="btn btn-ghost btn-sm" onClick={clearFalseAlarms}>🚫 Clear False</button>
+                            <button className="btn btn-danger btn-sm" onClick={clearHistory}>🗑 Clear All</button>
+                        </>
+                    )}
+                    <button className="btn btn-ghost btn-sm" onClick={fetchData}>↻ Refresh</button>
+                </div>
+            </div>
 
-            {loading ? (
-                <div className="loading">Loading alerts...</div>
-            ) : (
-                <div className="table-wrapper">
-                    <table className="alert-table">
-                        <thead>
-                            <tr>
-                                <th>Video / Source</th>
-                                <th>Detected Behavior</th>
-                                <th>Risk Level</th>
-                                <th>Status</th>
-                                <th>Timestamp</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {alerts.length === 0 ? (
+            {/* Stats */}
+            <div className="stats-bar">
+                <StatCard label="Total Incidents" value={stats?.total}      color="cyan"  icon="📊" loading={loading} />
+                <StatCard label="High Risk"        value={stats?.highRisk}  color="red"   icon="🚨" loading={loading} />
+                <StatCard label="Investigating"    value={stats?.investigating} color="amber" icon="🔍" loading={loading} />
+                <StatCard label="Resolved Today"   value={stats?.resolvedToday} color="green" icon="✅" loading={loading} />
+            </div>
+
+            {/* Panel */}
+            <div className="panel">
+                <div className="panel-header">
+                    <div className="panel-title">
+                        <span className="title-accent">◆</span> Incident Feed
+                        <span style={{ fontSize: '0.72rem', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontWeight: 400 }}>
+                            ({filtered.length} shown)
+                        </span>
+                    </div>
+                    {/* Filters */}
+                    <div className="filter-bar" style={{ margin: 0 }}>
+                        <input
+                            className="filter-input"
+                            placeholder="🔍 Search behavior, source..."
+                            value={filter.search}
+                            onChange={e => setFilter(f => ({ ...f, search: e.target.value }))}
+                        />
+                        <select className="filter-select" value={filter.risk} onChange={e => setFilter(f => ({ ...f, risk: e.target.value }))}>
+                            <option value="">All Risks</option>
+                            <option value="High">High</option>
+                            <option value="Medium">Medium</option>
+                            <option value="Low">Low</option>
+                        </select>
+                        <select className="filter-select" value={filter.status} onChange={e => setFilter(f => ({ ...f, status: e.target.value }))}>
+                            <option value="">All Status</option>
+                            {['Pending','Investigating','Verified','Reported','Resolved','False Alarm'].map(s =>
+                                <option key={s} value={s}>{s}</option>
+                            )}
+                        </select>
+                    </div>
+                </div>
+
+                {/* Table */}
+                {loading ? (
+                    <div className="loading-state"><div className="spin" /> Loading incidents...</div>
+                ) : (
+                    <div className="table-wrapper">
+                        <table className="data-table">
+                            <thead>
                                 <tr>
-                                    <td colSpan="6" className="empty-state">No alerts detected yet.</td>
+                                    <th>Camera / Location</th>
+                                    <th>Behavior</th>
+                                    <th>Risk</th>
+                                    <th>Status</th>
+                                    <th>Officer / Precinct</th>
+                                    <th>Time</th>
+                                    <th>Actions</th>
                                 </tr>
-                            ) : (
-                                alerts.map((alert) => (
-                                    <tr key={alert._id} className={alert.riskLevel === 'High' ? 'row-high-risk' : ''}>
+                            </thead>
+                            <tbody>
+                                {filtered.length === 0 ? (
+                                    <tr>
+                                        <td colSpan="6">
+                                            <div className="empty-state">
+                                                <div className="empty-icon">🛡️</div>
+                                                <div className="empty-text">No incidents match current filters</div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                ) : filtered.map(alert => (
+                                    <tr key={alert._id} className={isHigh(alert) ? 'risk-high' : ''}>
+                                        {/* Camera / Location */}
                                         <td>
-                                            {alert.videoName || 'Live Feed'}
-                                            {alert.location && (
-                                                <div style={{ fontSize: '0.8rem', marginTop: '4px' }}>
-                                                    <a
-                                                        href={`https://www.google.com/maps?q=${alert.location.lat},${alert.location.lon}`}
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        style={{ color: '#2ecc71', textDecoration: 'none', fontWeight: 'bold', display: 'flex', alignItems: 'center', gap: '4px' }}
-                                                    >
-                                                        📍 GPS: {alert.location.lat.toFixed(4)}, {alert.location.lon.toFixed(4)}
-                                                    </a>
+                                            <div style={{ fontWeight: 600, color: 'var(--text-primary)', fontSize: '0.84rem', marginBottom: 3 }}>
+                                                {alert.videoName || 'Live Feed'}
+                                            </div>
+                                            {alert.precinct && (
+                                                <div style={{ fontSize: '0.68rem', color: 'var(--cyan)', fontFamily: 'var(--font-mono)', marginBottom: 2 }}>
+                                                    🏛 {alert.precinct}
                                                 </div>
                                             )}
-                                            {alert.videoPath && (
-                                                <div style={{ fontSize: '0.8rem', marginTop: '4px' }}>
+                                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                                {alert.location && (
                                                     <a
-                                                        href={`http://localhost:4005${alert.videoPath}`}
-                                                        target="_blank"
-                                                        rel="noopener noreferrer"
-                                                        style={{ color: '#3498db', textDecoration: 'none', fontWeight: 'bold' }}
+                                                        className="gps-link"
+                                                        href={`https://www.google.com/maps?q=${alert.location.lat},${alert.location.lon}`}
+                                                        target="_blank" rel="noopener noreferrer"
                                                     >
-                                                        📹 View Incident Clip
+                                                        📍 {alert.location.lat?.toFixed(4)}, {alert.location.lon?.toFixed(4)}
                                                     </a>
+                                                )}
+                                                {alert.videoPath && (
+                                                    <a
+                                                        className="video-link"
+                                                        href={`http://localhost:4005${alert.videoPath}`}
+                                                        target="_blank" rel="noopener noreferrer"
+                                                    >
+                                                        📹 Clip
+                                                    </a>
+                                                )}
+                                            </div>
+                                            {alert.notes && (
+                                                <div style={{
+                                                    marginTop: 4,
+                                                    fontSize: '0.68rem',
+                                                    color: 'var(--text-secondary)',
+                                                    lineHeight: 1.4,
+                                                    maxWidth: 280,
+                                                    borderLeft: '2px solid var(--border)',
+                                                    paddingLeft: 6,
+                                                }}>
+                                                    {alert.notes}
                                                 </div>
                                             )}
                                         </td>
-                                        <td>{alert.behavior}</td>
-                                        <td>{getRiskBadge(alert.riskLevel)}</td>
-                                        <td><span className={`status status-${alert.status.toLowerCase()}`}>{alert.status}</span></td>
-                                        <td>{new Date(alert.timestamp).toLocaleString()}</td>
+
+                                        {/* Behavior */}
+                                        <td style={{ color: 'var(--text-primary)', fontWeight: 600 }}>{alert.behavior}</td>
+
+                                        {/* Risk */}
                                         <td>
-                                            <div style={{ display: 'flex', gap: '5px' }}>
-                                                {(user?.role === 'admin' || user?.role === 'police') && (
-                                                    <button
-                                                        className="action-btn-small investigate"
-                                                        onClick={() => updateStatus(alert._id, 'Investigating')}
-                                                        disabled={alert.status === 'Investigating'}
-                                                        style={{ fontSize: '0.7rem', padding: '4px 8px', background: '#3498db', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
-                                                    >
-                                                        Investigate
-                                                    </button>
-                                                )}
+                                            <span className={`badge badge-${RISK_CLASS[alert.riskLevel]}`}>
+                                                <span className="badge-dot" />
+                                                {alert.riskLevel}
+                                            </span>
+                                        </td>
 
-                                                {(user?.role === 'admin' || user?.role === 'police') && (
-                                                    <button
-                                                        className="action-btn-small resolve"
-                                                        onClick={() => updateStatus(alert._id, 'Resolved')}
-                                                        disabled={alert.status === 'Resolved'}
-                                                        style={{ fontSize: '0.7rem', padding: '4px 8px', background: '#2ecc71', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
-                                                    >
-                                                        Resolve
-                                                    </button>
-                                                )}
+                                        {/* Status */}
+                                        <td>
+                                            <span className={`status-badge status-${STATUS_SLUG(alert.status || 'pending')}`}>
+                                                {alert.status || 'Pending'}
+                                            </span>
+                                        </td>
 
-                                                {(user?.role === 'admin' || user?.role === 'cctv_user') && (
-                                                    <button
-                                                        className="action-btn-small verify"
-                                                        onClick={() => updateStatus(alert._id, 'Verified')}
-                                                        disabled={alert.status === 'Verified' || alert.status === 'Resolved'}
-                                                        style={{ fontSize: '0.7rem', padding: '4px 8px', background: '#e67e22', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
-                                                    >
-                                                        Verify
-                                                    </button>
-                                                )}
+                                        {/* Officer / Precinct */}
+                                        <td>
+                                            {alert.reportedBy ? (
+                                                <div>
+                                                    <div style={{ fontSize: '0.78rem', color: 'var(--text-primary)', fontWeight: 500 }}>
+                                                        {alert.reportedBy}
+                                                    </div>
+                                                </div>
+                                            ) : (
+                                                <span style={{ color: 'var(--text-dim)', fontSize: '0.72rem' }}>—</span>
+                                            )}
+                                        </td>
 
-                                                {(user?.role === 'admin' || user?.role === 'cctv_user') && (
-                                                    <button
-                                                        className="action-btn-small report"
-                                                        onClick={() => updateStatus(alert._id, 'Reported')}
-                                                        disabled={alert.status === 'Reported'}
-                                                        style={{ fontSize: '0.7rem', padding: '4px 8px', background: '#9b59b6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
-                                                    >
-                                                        Report
-                                                    </button>
-                                                )}
+                                        {/* Time */}
+                                        <td style={{ fontFamily: 'var(--font-mono)', fontSize: '0.72rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                                            <div>{relTime(alert.timestamp)}</div>
+                                            <div style={{ fontSize: '0.63rem', color: 'var(--text-dim)' }}>
+                                                {new Date(alert.timestamp).toLocaleTimeString()}
+                                            </div>
+                                        </td>
 
-                                                {(user?.role === 'admin' || user?.role === 'cctv_user') && (
+                                        {/* Actions */}
+                                        <td>
+                                            <div className="actions-cell">
+                                                {actions.map(s => (
                                                     <button
-                                                        className="action-btn-small false-alarm"
-                                                        onClick={() => updateStatus(alert._id, 'False Alarm')}
-                                                        disabled={alert.status === 'False Alarm'}
-                                                        style={{ fontSize: '0.7rem', padding: '4px 8px', background: '#95a5a6', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
+                                                        key={s}
+                                                        className={`btn btn-xs ${s === 'Resolved' ? 'btn-success' : 'btn-ghost'}`}
+                                                        onClick={() => updateStatus(alert._id, s)}
+                                                        disabled={alert.status === s}
+                                                        style={{ fontFamily: 'var(--font-mono)' }}
                                                     >
-                                                        False
+                                                        {s === 'Investigating' ? '🔍' : s === 'Resolved' ? '✅' : s === 'Verified' ? '✔' : s === 'Reported' ? '📋' : '✗'} {s.split(' ')[0]}
                                                     </button>
-                                                )}
-
-                                                {(user?.role === 'admin' || user?.role === 'police') && (
-                                                    <button
-                                                        className="action-btn-small delete"
-                                                        onClick={() => deleteAlert(alert._id)}
-                                                        style={{ fontSize: '0.7rem', padding: '4px 8px', background: '#e74c3c', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
-                                                    >
-                                                        🗑️ Delete
-                                                    </button>
+                                                ))}
+                                                {(isAdmin || isPolice) && (
+                                                    <button className="btn btn-xs btn-danger" onClick={() => deleteAlert(alert._id)}>🗑</button>
                                                 )}
                                             </div>
                                         </td>
                                     </tr>
-                                ))
-                            )}
-                        </tbody>
-                    </table>
-                </div>
-            )}
+                                ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </div>
         </div>
     );
-};
-
-export default Dashboard;
+}

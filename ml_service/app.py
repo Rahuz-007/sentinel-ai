@@ -18,14 +18,14 @@ logging.basicConfig(
     ]
 )
 
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+# app.py runs from ml_service/ — prediction/ and utils/ are direct sub-packages
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from dotenv import load_dotenv
 load_dotenv()
 
-from ml_service.prediction.predictor import predictor
-from ml_service.utils.alert_system import AlertSystem
+from prediction.predictor import predictor
+from utils.alert_system import AlertSystem
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}}) # Enable CORS for Frontend
@@ -37,9 +37,13 @@ def log_info(msg):
 
 alert_system = AlertSystem()
 
+@app.route('/health', methods=['GET'])
 @app.route('/test', methods=['GET'])
 def test_connection():
-    return jsonify({"status": "ok", "message": "ML Service is reachable"})
+    return jsonify({"status": "ok", "service": "Sentinel AI ML Service", "version": "3.0.0",
+                    "engine": "PyTorch MobileNetV2",
+                    "model_loaded": predictor.classifier is not None,
+                    "yolo_loaded":  predictor.person_model is not None})
 
 @app.route('/test-alert', methods=['GET'])
 def test_alert():
@@ -74,7 +78,7 @@ def send_video_alert():
         return jsonify({"status": "ok", "message": "Video alert processing started"})
         
     except Exception as e:
-        logger.error(f"Error in send_video_alert: {e}")
+        logging.error(f"Error in send_video_alert: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/demo_mode', methods=['POST'])

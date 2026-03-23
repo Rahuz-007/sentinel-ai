@@ -1,21 +1,51 @@
-import React, { useState } from 'react';
-import Navbar from './components/Navbar';
+import React, { useState, useEffect, useCallback } from 'react';
+import Navbar   from './components/Navbar';
 import Dashboard from './components/Dashboard';
 import VideoUpload from './components/VideoUpload';
 import WebcamStream from './components/WebcamStream';
 import Login from './components/Login';
 import './index.css';
 
+// ─── Toast Context ─────────────────────────────────────────────
+export const ToastContext = React.createContext(null);
+
+function ToastProvider({ children }) {
+    const [toasts, setToasts] = useState([]);
+
+    const addToast = useCallback((msg, type = 'info', duration = 4000) => {
+        const id = Date.now();
+        setToasts(prev => [...prev, { id, msg, type }]);
+        setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), duration);
+    }, []);
+
+    const icons = { success: '✅', error: '❌', warning: '⚠️', info: 'ℹ️' };
+
+    return (
+        <ToastContext.Provider value={addToast}>
+            {children}
+            <div className="toast-container">
+                {toasts.map(t => (
+                    <div key={t.id} className={`toast ${t.type}`}>
+                        <span>{icons[t.type] || '📢'}</span>
+                        <span>{t.msg}</span>
+                    </div>
+                ))}
+            </div>
+        </ToastContext.Provider>
+    );
+}
+
+// ─── App ───────────────────────────────────────────────────────
 function App() {
     const [activeTab, setActiveTab] = useState('dashboard');
-    const [user, setUser] = useState(null);
-    const [token, setToken] = useState(localStorage.getItem('token'));
+    const [user,     setUser]  = useState(null);
+    const [token,    setToken] = useState(() => localStorage.getItem('token'));
 
-    // Check for existing session on load (simplified)
-    React.useEffect(() => {
+    useEffect(() => {
         const savedUser = localStorage.getItem('user');
         if (token && savedUser) {
-            setUser(JSON.parse(savedUser));
+            try { setUser(JSON.parse(savedUser)); }
+            catch { localStorage.clear(); setToken(null); }
         }
     }, [token]);
 
@@ -35,30 +65,30 @@ function App() {
     };
 
     if (!token) {
-        return <Login onLogin={handleLogin} />;
+        return (
+            <ToastProvider>
+                <Login onLogin={handleLogin} />
+            </ToastProvider>
+        );
     }
 
     return (
-        <div className="app-container">
-            <Navbar
-                activeTab={activeTab}
-                setActiveTab={setActiveTab}
-                user={user}
-                onLogout={handleLogout}
-            />
-
-            <main className="main-content">
-                {activeTab === 'dashboard' && <Dashboard user={user} />}
-
-                {activeTab === 'upload' && (user?.role === 'admin' || user?.role === 'police' || user?.role === 'cctv_user') && (
-                    <VideoUpload />
-                )}
-
-                {activeTab === 'webcam' && (user?.role === 'admin' || user?.role === 'cctv_user') && (
-                    <WebcamStream />
-                )}
-            </main>
-        </div>
+        <ToastProvider>
+            <div className="app-container">
+                <Navbar
+                    activeTab={activeTab}
+                    setActiveTab={setActiveTab}
+                    user={user}
+                    onLogout={handleLogout}
+                    token={token}
+                />
+                <main className="main-content">
+                    {activeTab === 'dashboard' && <Dashboard user={user} token={token} />}
+                    {activeTab === 'webcam'    && (user?.role === 'admin' || user?.role === 'cctv_user') && <WebcamStream token={token} />}
+                    {activeTab === 'upload'    && <VideoUpload token={token} />}
+                </main>
+            </div>
+        </ToastProvider>
     );
 }
 
