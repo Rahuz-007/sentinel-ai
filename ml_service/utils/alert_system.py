@@ -3,7 +3,14 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
-from twilio.rest import Client
+try:
+    from twilio.rest import Client as TwilioClient
+    _TWILIO_OK = True
+except ImportError:
+    TwilioClient = None
+    _TWILIO_OK = False
+    print("⚠️  twilio not installed — SMS alerts disabled")
+
 import cv2
 import time
 import logging
@@ -90,8 +97,12 @@ class AlertSystem:
             logger.warning("Alert System: Twilio credentials not configured. Skipping SMS.")
             return False
             
+        if not _TWILIO_OK:
+            logger.warning("Twilio not installed — SMS skipped")
+            return False
         try:
-            client = Client(self.twilio_sid, self.twilio_auth_token)
+            client = TwilioClient(self.twilio_sid, self.twilio_auth_token)
+
             message = client.messages.create(
                 body=body,
                 from_=self.twilio_phone,

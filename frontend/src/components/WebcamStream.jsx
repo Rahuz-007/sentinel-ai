@@ -128,17 +128,16 @@ export default function WebcamStream({ token }) {
                 setFrameCount(c => c + 1);
 
                 // ── Alert logic ──
-                const isViolent = pred.risk === 'High' &&
-                    ['Fight', 'Assault', 'Violence'].some(k => pred.class?.includes(k));
+                const isViolent = pred.class === 'Fighting' || pred.class === 'Assault';
 
                 if (isViolent) {
                     riskDropTime.current = null;
                     if (!highRiskStart.current) {
-                        if (Date.now() - lastAlertTime.current >= 10000) {
+                        if (Date.now() - lastAlertTime.current >= 5000) {   // 5s cooldown (was 10s)
                             highRiskStart.current = Date.now();
                             startRecording();
                         }
-                    } else if (Date.now() - highRiskStart.current > 3000 && !hasAlerteRef.current) {
+                    } else if (Date.now() - highRiskStart.current > 2000 && !hasAlerteRef.current) {  // 2s (was 3s)
                         hasAlerteRef.current = true;
                         lastAlertTime.current = Date.now();
                         speakAlert(pred.class);
@@ -153,6 +152,7 @@ export default function WebcamStream({ token }) {
                             hasAlerteRef.current  = false;
                             riskDropTime.current  = null;
                         }
+
                     }
                 }
             } catch (err) {
